@@ -1,0 +1,136 @@
+name: PR checks
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  TF_VERSION: "~1.13.0"
+  AWS_REGION: us-east-1
+
+jobs:
+  lint:
+    name: Format, validate, lint, scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: terraform fmt
+        run: terraform fmt -check -recursive
+
+      - name: terraform validate
+        run: |
+          for dir in envs/dev envs/prod bootstrap; do
+            echo "::group::$dir"
+            terraform -chdir=$dir init -backend=false -input=false
+            terraform -chdir=$dir validate
+            echo "::endgroup::"
+          done
+
+      - name: terraform test (unit, mocked AWS)
+        run: |
+          for m in modules/*/; do
+            if [ -f "$m/tests/unit.tftest.hcl" ]; then
+              echo "::group::$m"
+              terraform -chdir=$m init -backend=false -input=false
+              terraform -chdir=$m test -filter=tests/unit.tftest.hcl
+              echo "::endgroup::"
+            fi
+          done
+
+      - uses: terraform-linters/setup-tflint@v4
+      - name: tflint
+        run: |
+          tflint --init
+          tflint --recursive --config "$GITHUB_WORKSPACE/.tflint.hcl"
+
+      - name: Checkov security scan
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: .
+          framework: terraform
+          quiet: true
+          soft_fail: true # report only; flip to false once you've worked through the findings
+
+  test:
+    name: Python unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install -r app/requirements-dev.txt
+      - run: pytest -q app/tests
+
+  plan:
+    name: Plan (${{ matrix.environment }})
+    needs: [lint, test]
+    # PRs from forks never get AWS credentials
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write       # OIDC -> AWS
+      pull-requests: write  # post plan as a comment
+    strategy:
+      fail-fast: false
+      matrix:
+        environment: [dev, prod]
+    defaults:
+      run:
+        working-directory: envs/${{ matrix.environment }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.PLAN_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: terraform init
+        run: terraform init -input=false -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}"
+
+      - name: terraform plan
+        id: plan
+        run: |
+          set +e
+          terraform plan -input=false -no-color -lock-timeout=2m -out=tfplan > plan.txt 2>&1
+          code=$?
+          cat plan.txt
+          echo "exitcode=$code" >> "$GITHUB_OUTPUT"
+          exit $code
+
+      - name: Comment plan on PR
+        if: always() && steps.plan.outcome != 'skipped'
+        uses: actions/github-script@v7
+        env:
+          ENVIRONMENT: ${{ matrix.environment }}
+          PLAN_EXIT: ${{ steps.plan.outputs.exitcode }}
+        with:
+          script: |
+            const fs = require('fs');
+            const env = process.env.ENVIRONMENT;
+            const marker = `<!-- tf-plan-${env} -->`;
+            let plan = fs.readFileSync(`envs/${env}/plan.txt`, 'utf8');
+            if (plan.length > 60000) plan = plan.slice(-60000) + '\n...(truncated, see job log)';
+            const status = process.env.PLAN_EXIT === '0' ? '✅' : '❌';
+            const body = `${marker}\n### ${status} Terraform plan: \`${env}\`\n<details><summary>Show plan</summary>\n\n\`\`\`\n${plan}\n\`\`\`\n</details>`;
+            const { data: comments } = await github.rest.issues.listComments({
+              ...context.repo, issue_number: context.issue.number });
+            const existing = comments.find(c => c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ ...context.repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ ...context.repo, issue_number: context.issue.number, body });
+            }

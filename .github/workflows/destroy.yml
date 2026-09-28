@@ -1,0 +1,42 @@
+name: Destroy
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Environment to destroy
+        type: choice
+        options: [dev, prod]
+      confirm:
+        description: Type the environment name again to confirm
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  TF_VERSION: "~1.13.0"
+  AWS_REGION: us-east-1
+
+jobs:
+  destroy:
+    if: inputs.confirm == inputs.environment
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }} # prod still needs your approval
+    concurrency:
+      group: terraform-${{ inputs.environment }}
+    defaults:
+      run:
+        working-directory: envs/${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.APPLY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - run: terraform init -input=false -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}"
+      - run: terraform destroy -input=false -auto-approve -lock-timeout=2m

@@ -1,0 +1,65 @@
+name: Drift detection
+
+on:
+  schedule:
+    - cron: "17 14 * * *" # daily, ~7am Pacific
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+  issues: write
+
+env:
+  TF_VERSION: "~1.13.0"
+  AWS_REGION: us-east-1
+
+jobs:
+  drift:
+    name: Drift (${{ matrix.environment }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        environment: [dev, prod]
+    defaults:
+      run:
+        working-directory: envs/${{ matrix.environment }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.PLAN_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - run: terraform init -input=false -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}"
+
+      - name: Detect drift
+        id: plan
+        run: |
+          set +e
+          terraform plan -input=false -no-color -detailed-exitcode -lock-timeout=2m > plan.txt 2>&1
+          echo "exitcode=$?" >> "$GITHUB_OUTPUT"
+          cat plan.txt
+
+      - name: Open issue on drift
+        if: steps.plan.outputs.exitcode == '2'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ENVIRONMENT: ${{ matrix.environment }}
+        run: |
+          title="Drift detected in $ENVIRONMENT"
+          if gh issue list --state open --search "$title in:title" --json number -q '.[0].number' | grep -q .; then
+            echo "Issue already open"; exit 0
+          fi
+          { echo "Nightly plan found changes made outside Terraform."; echo; echo '```'; tail -c 60000 plan.txt; echo '```'; } > body.md
+          gh issue create --title "$title" --body-file body.md
+
+      - name: Fail on error
+        if: steps.plan.outputs.exitcode == '1'
+        run: exit 1

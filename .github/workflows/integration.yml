@@ -1,0 +1,36 @@
+name: Integration tests
+
+on:
+  schedule:
+    - cron: "43 13 * * 1" # weekly, Monday ~6:40am Pacific
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  TF_VERSION: "~1.13.0"
+  AWS_REGION: us-east-1
+
+jobs:
+  lambda-api:
+    runs-on: ubuntu-latest
+    environment: dev # uses the dev apply role; resources are named url-shortener-dev-itest-*
+    concurrency:
+      group: integration-tests
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.APPLY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: terraform test (integration, real AWS)
+        working-directory: modules/lambda-api
+        run: |
+          terraform init -backend=false -input=false
+          terraform test -filter=tests/integration.tftest.hcl

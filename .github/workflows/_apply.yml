@@ -1,0 +1,65 @@
+# Reusable workflow: terraform apply for one environment
+name: _apply
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  TF_VERSION: "~1.13.0"
+  AWS_REGION: us-east-1
+
+jobs:
+  apply:
+    name: Apply (${{ inputs.environment }})
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ inputs.environment }}
+      url: ${{ steps.out.outputs.site_url }}
+    concurrency:
+      group: terraform-${{ inputs.environment }}
+      cancel-in-progress: false
+    defaults:
+      run:
+        working-directory: envs/${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.APPLY_ROLE_ARN }} # Environment-level variable
+          aws-region: ${{ env.AWS_REGION }}
+
+      - run: terraform init -input=false -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}"
+      - run: terraform plan -input=false -lock-timeout=2m -out=tfplan
+      - run: terraform apply -input=false -lock-timeout=2m tfplan
+
+      - name: Outputs
+        id: out
+        run: |
+          echo "site_url=$(terraform output -raw site_url)" >> "$GITHUB_OUTPUT"
+          echo "### ${{ inputs.environment }} deployed" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Site: $(terraform output -raw site_url)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- API: $(terraform output -raw api_url)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Smoke test
+        run: |
+          API=$(terraform output -raw api_url | sed 's:/*$::')
+          code=$(curl -s -X POST "$API/links" -H 'content-type: application/json' \
+                  -d '{"url":"https://example.com"}' | jq -r .code)
+          test -n "$code" && [ "$code" != "null" ] || { echo "POST /links failed"; exit 1; }
+          status=$(curl -s -o /dev/null -w '%{http_code}' "$API/$code")
+          [ "$status" = "301" ] || { echo "GET /$code returned $status"; exit 1; }
+          curl -sf "$(terraform output -raw site_url)" > /dev/null || { echo "Site not reachable"; exit 1; }
+          echo "Smoke test passed"

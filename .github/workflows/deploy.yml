@@ -1,0 +1,43 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "envs/**"
+      - "modules/**"
+      - "app/**"
+      - "frontend/**"
+      - ".github/workflows/deploy.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # passed down to the reusable apply workflow
+
+env:
+  TF_VERSION: "~1.13.0"
+  AWS_REGION: us-east-1
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install -r app/requirements-dev.txt
+      - run: pytest -q app/tests
+
+  dev:
+    needs: test
+    uses: ./.github/workflows/_apply.yml
+    with:
+      environment: dev
+
+  prod:
+    needs: dev # prod only after dev succeeds, and after your approval (Environment rule)
+    uses: ./.github/workflows/_apply.yml
+    with:
+      environment: prod
