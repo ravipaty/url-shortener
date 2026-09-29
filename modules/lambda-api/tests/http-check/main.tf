@@ -25,3 +25,13 @@ data "http" "post" {
     min_delay_ms = 3000 # a brand-new API can take a few seconds to start answering
   }
 }
+
+output "status_code" {
+  description = "HTTP status of the POST."
+  value       = data.http.post.status_code
+}
+
+output "response_body" {
+  description = "Response body of the POST."
+  value       = data.http.post.response_body
+}
