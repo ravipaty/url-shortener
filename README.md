@@ -52,7 +52,8 @@ GitHub Actions ──OIDC──► IAM roles (no stored AWS keys)
    - `PLAN_ROLE_ARN` = output `plan_role_arn`
 
 4. **Environments** — *Settings → Environments*:
-   - `dev`: add variable `APPLY_ROLE_ARN` = `apply_role_arns["dev"]`
+   - `dev`: add variable `APPLY_ROLE_ARN` = `apply_role_arns["dev"]`,
+     and set **Deployment branches** to `main` only (otherwise any branch can get dev credentials).
    - `prod`: add variable `APPLY_ROLE_ARN` = `apply_role_arns["prod"]`,
      tick **Required reviewers** (add yourself), and set **Deployment branches** to `main` only.
 
@@ -73,8 +74,9 @@ GitHub Actions ──OIDC──► IAM roles (no stored AWS keys)
 ## Security notes (public repo)
 
 - No AWS keys in GitHub. Roles trust only this repo, and:
-  - the plan role: pull requests + `main` (read-only + state lock),
-  - apply roles: only jobs running in the matching GitHub Environment.
+  - the plan role: pull requests + `main` (read-only; can write only the `*.tflock` lock files, never state),
+  - apply roles: only jobs running in the matching GitHub Environment, and only
+    resources/state named for that environment (the dev role can't touch prod).
 - PRs from forks never receive OIDC tokens, and the plan job is skipped for them.
 - Apply roles can't modify the `gha-*` roles themselves.
 - Never commit `*.tfvars` with personal info or any `*.tfstate` (see `.gitignore`).
