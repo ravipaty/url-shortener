@@ -1,5 +1,8 @@
 # Copy to terraform.tfvars (git-ignored) and fill in
 github_owner       = "your-github-username"
 github_repo        = "url-shortener"
+# Only if `gh api repos/OWNER/REPO/actions/oidc/customization/sub` shows use_immutable_subject: true
+# github_owner_id    = 1234567
+# github_repo_id     = 123456789
 budget_email       = "you@example.com"
 monthly_budget_usd = "5"

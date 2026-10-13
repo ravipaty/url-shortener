@@ -20,6 +20,18 @@ variable "github_repo" {
   type        = string
 }
 
+variable "github_owner_id" {
+  description = "Numeric GitHub owner ID, if the repo uses immutable OIDC subjects (else null)."
+  type        = number
+  default     = null
+}
+
+variable "github_repo_id" {
+  description = "Numeric GitHub repo ID, if the repo uses immutable OIDC subjects (else null)."
+  type        = number
+  default     = null
+}
+
 variable "budget_email" {
   description = "Email that receives AWS Budget alerts."
   type        = string

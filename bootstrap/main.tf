@@ -2,7 +2,14 @@ data "aws_caller_identity" "current" {}
 
 locals {
   account_id = data.aws_caller_identity.current.account_id
-  repo       = "${var.github_owner}/${var.github_repo}"
+  # GitHub's OIDC "sub" claim. Repos using immutable subjects embed numeric IDs
+  # (owner@123/repo@456) so a deleted-and-recreated repo can't inherit access.
+  # Check yours: gh api repos/OWNER/REPO/actions/oidc/customization/sub
+  repo = (
+    var.github_owner_id != null && var.github_repo_id != null
+    ? "${var.github_owner}@${var.github_owner_id}/${var.github_repo}@${var.github_repo_id}"
+    : "${var.github_owner}/${var.github_repo}"
+  )
 }
 
 # ---------------------------------------------------------------------------
