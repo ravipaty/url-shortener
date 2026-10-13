@@ -2,7 +2,14 @@ data "aws_caller_identity" "current" {}
 
 locals {
   account_id = data.aws_caller_identity.current.account_id
-  repo       = "${var.github_owner}/${var.github_repo}"
+  # GitHub's OIDC "sub" claim. Repos using immutable subjects embed numeric IDs
+  # (owner@123/repo@456) so a deleted-and-recreated repo can't inherit access.
+  # Check yours: gh api repos/OWNER/REPO/actions/oidc/customization/sub
+  repo = (
+    var.github_owner_id != null && var.github_repo_id != null
+    ? "${var.github_owner}@${var.github_owner_id}/${var.github_repo}@${var.github_repo_id}"
+    : "${var.github_owner}/${var.github_repo}"
+  )
 }
 
 # ---------------------------------------------------------------------------
@@ -101,8 +108,8 @@ data "aws_iam_policy_document" "plan_trust" {
       test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
       values = [
-        "repo:${local.repo}:pull_request",         # PRs from branches in YOUR repo (forks never get OIDC tokens)
-        "repo:${local.repo}:ref:refs/heads/main",  # scheduled drift detection on main
+        "repo:${local.repo}:pull_request",        # PRs from branches in YOUR repo (forks never get OIDC tokens)
+        "repo:${local.repo}:ref:refs/heads/main", # scheduled drift detection on main
       ]
     }
   }
@@ -118,22 +125,27 @@ resource "aws_iam_role_policy_attachment" "plan_readonly" {
   policy_arn = "arn:aws:iam::aws:policy/ReadOnlyAccess"
 }
 
-# Plan still needs to write the S3 lock file
-data "aws_iam_policy_document" "state_rw" {
+# Plan reads every state file but may only write the S3 lock files. PR workflows
+# run the PR branch's own YAML, so this role must never be able to overwrite state.
+data "aws_iam_policy_document" "plan_state" {
   statement {
     actions   = ["s3:ListBucket"]
     resources = [aws_s3_bucket.tfstate.arn]
   }
   statement {
-    actions   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
+    actions   = ["s3:GetObject"]
     resources = ["${aws_s3_bucket.tfstate.arn}/*"]
+  }
+  statement {
+    actions   = ["s3:PutObject", "s3:DeleteObject"]
+    resources = ["${aws_s3_bucket.tfstate.arn}/*.tflock"]
   }
 }
 
 resource "aws_iam_role_policy" "plan_state" {
   name   = "tfstate"
   role   = aws_iam_role.plan.id
-  policy = data.aws_iam_policy_document.state_rw.json
+  policy = data.aws_iam_policy_document.plan_state.json
 }
 
 # --- Apply roles: one per GitHub Environment (dev, prod) --------------------
@@ -162,28 +174,43 @@ data "aws_iam_policy_document" "apply_trust" {
 }
 
 # Least-privilege-ish: only the services this project uses, only resources
-# named with the project prefix. If apply fails with AccessDenied, add the
-# exact action from the error message – that's part of the learning.
+# named with this environment's prefix (url-shortener-<env>), so the dev role
+# can't touch prod. If apply fails with AccessDenied, add the exact action
+# from the error message – that's part of the learning.
 data "aws_iam_policy_document" "apply" {
-  source_policy_documents = [data.aws_iam_policy_document.state_rw.json]
+  for_each = var.environments
 
+  statement {
+    sid       = "StateList"
+    actions   = ["s3:ListBucket"]
+    resources = [aws_s3_bucket.tfstate.arn]
+  }
+  statement {
+    sid       = "StateRW"
+    actions   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
+    resources = ["${aws_s3_bucket.tfstate.arn}/${var.project}/${each.key}/*"]
+  }
   statement {
     sid     = "S3Site"
     actions = ["s3:*"]
     resources = [
-      "arn:aws:s3:::${var.project}-*-site-*",
-      "arn:aws:s3:::${var.project}-*-site-*/*",
+      "arn:aws:s3:::${var.project}-${each.key}-site-*",
+      "arn:aws:s3:::${var.project}-${each.key}-site-*/*",
     ]
   }
   statement {
     sid       = "DynamoDB"
     actions   = ["dynamodb:*"]
-    resources = ["arn:aws:dynamodb:${var.aws_region}:${local.account_id}:table/${var.project}-*"]
+    resources = ["arn:aws:dynamodb:${var.aws_region}:${local.account_id}:table/${var.project}-${each.key}-*"]
   }
   statement {
-    sid       = "Lambda"
-    actions   = ["lambda:*"]
-    resources = ["arn:aws:lambda:${var.aws_region}:${local.account_id}:function:${var.project}-*"]
+    sid     = "Lambda"
+    actions = ["lambda:*"]
+    # The function is named exactly url-shortener-<env>; itest ones add a suffix
+    resources = [
+      "arn:aws:lambda:${var.aws_region}:${local.account_id}:function:${var.project}-${each.key}",
+      "arn:aws:lambda:${var.aws_region}:${local.account_id}:function:${var.project}-${each.key}-*",
+    ]
   }
   statement {
     sid       = "ApiGateway"
@@ -196,9 +223,13 @@ data "aws_iam_policy_document" "apply" {
     resources = ["*"]
   }
   statement {
-    sid       = "Logs"
-    actions   = ["logs:*"]
-    resources = ["arn:aws:logs:${var.aws_region}:${local.account_id}:log-group:/aws/lambda/${var.project}-*"]
+    sid     = "Logs"
+    actions = ["logs:*"]
+    resources = [
+      "arn:aws:logs:${var.aws_region}:${local.account_id}:log-group:/aws/lambda/${var.project}-${each.key}",
+      "arn:aws:logs:${var.aws_region}:${local.account_id}:log-group:/aws/lambda/${var.project}-${each.key}:*",
+      "arn:aws:logs:${var.aws_region}:${local.account_id}:log-group:/aws/lambda/${var.project}-${each.key}-*",
+    ]
   }
   statement {
     sid       = "LogsDescribe"
@@ -216,10 +247,7 @@ data "aws_iam_policy_document" "apply" {
       "iam:ListInstanceProfilesForRole", "iam:UpdateAssumeRolePolicy",
     ]
     # gha-* roles are excluded on purpose: the pipeline can't edit its own permissions
-    resources = [
-      "arn:aws:iam::${local.account_id}:role/${var.project}-dev-*",
-      "arn:aws:iam::${local.account_id}:role/${var.project}-prod-*",
-    ]
+    resources = ["arn:aws:iam::${local.account_id}:role/${var.project}-${each.key}-*"]
   }
 }
 
@@ -233,5 +261,5 @@ resource "aws_iam_role_policy" "apply" {
   for_each = var.environments
   name     = "apply"
   role     = aws_iam_role.apply[each.key].id
-  policy   = data.aws_iam_policy_document.apply.json
+  policy   = data.aws_iam_policy_document.apply[each.key].json
 }

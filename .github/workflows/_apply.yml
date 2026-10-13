@@ -60,6 +60,6 @@ jobs:
                   -d '{"url":"https://example.com"}' | jq -r .code)
           test -n "$code" && [ "$code" != "null" ] || { echo "POST /links failed"; exit 1; }
           status=$(curl -s -o /dev/null -w '%{http_code}' "$API/$code")
-          [ "$status" = "301" ] || { echo "GET /$code returned $status"; exit 1; }
+          [ "$status" = "302" ] || { echo "GET /$code returned $status"; exit 1; }
           curl -sf "$(terraform output -raw site_url)" > /dev/null || { echo "Site not reachable"; exit 1; }
           echo "Smoke test passed"

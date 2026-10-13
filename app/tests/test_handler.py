@@ -44,13 +44,18 @@ def test_create_and_resolve(handler):
     resolved = handler.lambda_handler(
         {"routeKey": "GET /{code}", "pathParameters": {"code": code}}, None
     )
-    assert resolved["statusCode"] == 301
+    assert resolved["statusCode"] == 302
     assert resolved["headers"]["location"] == "https://example.com/page"
 
 
-@pytest.mark.parametrize("bad", ["", "ftp://x.com", "not a url", "javascript:alert(1)"])
+@pytest.mark.parametrize("bad", ["", "ftp://x.com", "not a url", "javascript:alert(1)", 123, None, ["https://x.com"]])
 def test_rejects_invalid_urls(handler, bad):
     assert _post(handler, {"url": bad})["statusCode"] == 400
+
+
+@pytest.mark.parametrize("body", [[], "https://example.com", 42])
+def test_rejects_non_object_body(handler, body):
+    assert _post(handler, body)["statusCode"] == 400
 
 
 def test_unknown_code_is_404(handler):

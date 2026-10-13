@@ -31,7 +31,7 @@ run "create_link_returns_201" {
   }
 
   assert {
-    condition     = data.http.post.status_code == 201
-    error_message = "POST /links failed: ${data.http.post.response_body}"
+    condition     = output.status_code == 201
+    error_message = "POST /links failed: ${output.response_body}"
   }
 }

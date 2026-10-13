@@ -9,6 +9,7 @@ on:
       - "app/**"
       - "frontend/**"
       - ".github/workflows/deploy.yml"
+      - ".github/workflows/_apply.yml"
   workflow_dispatch:
 
 permissions:

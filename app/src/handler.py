@@ -1,7 +1,7 @@
 """URL shortener Lambda (API Gateway HTTP API, payload v2.0).
 
 POST /links   {"url": "https://..."}  -> 201 {"code": "...", "short_url": "..."}
-GET  /{code}                          -> 301 redirect to the original URL
+GET  /{code}                          -> 302 redirect to the original URL
 """
 import json
 import os
@@ -32,6 +32,8 @@ def _response(status, body=None, headers=None):
 
 
 def _is_valid_url(url):
+    if not isinstance(url, str):
+        return False
     try:
         parsed = urlparse(url)
     except (TypeError, ValueError):
@@ -44,6 +46,8 @@ def create_link(event):
         payload = json.loads(event.get("body") or "{}")
     except json.JSONDecodeError:
         return _response(400, {"error": "Body must be JSON"})
+    if not isinstance(payload, dict):
+        return _response(400, {"error": "Body must be a JSON object"})
 
     url = payload.get("url", "")
     if not _is_valid_url(url):
@@ -71,7 +75,9 @@ def resolve_link(event):
     item = _get_table().get_item(Key={"code": code}).get("Item")
     if not item:
         return _response(404, {"error": "Not found"})
-    return _response(301, headers={"location": item["url"]})
+    # 302, not 301: browsers cache 301s forever, so repeat clicks would never
+    # reach Lambda (breaks click counting and changing a link's target)
+    return _response(302, headers={"location": item["url"]})
 
 
 def lambda_handler(event, context):
